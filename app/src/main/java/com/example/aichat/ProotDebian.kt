@@ -1,8 +1,10 @@
 package com.example.aichat
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
@@ -17,15 +19,17 @@ object ProotDebian {
     val progress: StateFlow<String> get() = _progress
     private val _progress = MutableStateFlow("")
 
-    // 持久化记录：App 重启后能从 filesDir 推断状态
     private var filesPath = ""
     @Volatile private var stateInited = false
 
-    /** 初始化状态流（App 启动时调用一次，读取已存在的文件系统状态） */
     fun initState(context: Context) {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
+        refresh()
+    }
+
+    private fun refresh() {
         _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED
     }
 
@@ -34,12 +38,18 @@ object ProotDebian {
     private fun busybox() = File(binDir(), "busybox")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
-    fun isReady(): Boolean = filesPath.isNotEmpty()
-            && proot().exists() && busybox().exists()
-            && File(rootDir(), "bin").exists()
+    /** 判断 Debian 是否就绪：proot + busybox 存在 + rootfs 内有 bin（处理 Debian 11 的 bin→usr/bin 符号链接） */
+    fun isReady(): Boolean {
+        if (filesPath.isEmpty()) return false
+        if (!proot().exists()) return false
+        if (!busybox().exists()) return false
+        val r = rootDir()
+        // Debian 11 的 /bin 是指向 /usr/bin 的符号链接，两种都查
+        return File(r, "bin").exists() || File(r, "usr/bin").exists()
+    }
 
     /** 完全离线初始化：从 APK assets 复制所有组件，解压 rootfs */
-    suspend fun initialize(context: Context): Boolean {
+    suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
         try {
             filesPath = context.filesDir.absolutePath
             binDir().mkdirs()
@@ -58,8 +68,8 @@ object ProotDebian {
                 proot().setExecutable(true)
             }
 
-            // 3. Debian rootfs（从 assets 复制 tar.xz → 解压）
-            if (!File(rootDir(), "bin").exists()) {
+            // 3. Debian rootfs
+            if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
                 _state.value = State.EXTRACTING
                 _progress.value = "解压 Debian 11 rootfs（约 400MB，需 3-5 分钟）…"
                 rootDir().mkdirs()
@@ -70,12 +80,21 @@ object ProotDebian {
                     filesPath, 600_000
                 )
                 archive.delete()
-                if (!r.ok) { _state.value = State.ERROR; _progress.value = "解压失败：${r.output}"; return false }
+                if (!r.ok) {
+                    _progress.value = "解压失败：${r.output}"
+                    _state.value = State.ERROR
+                    return@withContext false
+                }
             }
 
-            _state.value = State.READY; _progress.value = "Debian 11 终端就绪"; return true
+            // 以文件系统实况为准，不盲设 READY
+            val ok = isReady()
+            _state.value = if (ok) State.READY else State.ERROR
+            _progress.value = if (ok) "Debian 11 终端就绪"
+                else "初始化异常：文件缺失。proot=${proot().exists()} busybox=${busybox().exists()} rootfsBin=${File(rootDir(), "usr/bin").exists()}"
+            ok
         } catch (e: Exception) {
-            _state.value = State.ERROR; _progress.value = "初始化失败：${e.message}"; return false
+            _state.value = State.ERROR; _progress.value = "初始化失败：${e.message}"; false
         }
     }
 
