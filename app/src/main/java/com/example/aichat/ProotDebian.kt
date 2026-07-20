@@ -99,9 +99,9 @@ object ProotDebian {
                 )
                 if (!r.ok) { _state.value = State.ERROR; _progress.value = "解压失败：${r.output}"; return false }
             }
-            _state.value = State.READY; _progress.value = "Debian 11 终端就绪"; true
+            _state.value = State.READY; _progress.value = "Debian 11 终端就绪"; return true
         } catch (e: Exception) {
-            _state.value = State.ERROR; _progress.value = "初始化失败：${e.message}"; false
+            _state.value = State.ERROR; _progress.value = "初始化失败：${e.message}"; return false
         }
     }
 
