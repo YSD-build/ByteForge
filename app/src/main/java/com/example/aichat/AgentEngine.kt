@@ -109,6 +109,7 @@ ACTION: {"tool":"工具名","参数名":"值"}
     private fun readFile(path: String?): ToolResult {
         val f = safeFile(path) ?: return ToolResult(false, "路径不合法或越界：$path")
         if (!f.exists()) return ToolResult(false, "文件不存在：$path")
+        if (f.isDirectory) return ToolResult(false, "是目录不是文件：$path\n目录内容：\n${f.listFiles()?.joinToString("\n") { "  ${it.name}" } ?: "(空)"}")
         return try {
             val text = f.readText()
             val preview = if (text.length > 4000) text.take(4000) + "\n…(已截断)" else text

@@ -174,16 +174,10 @@ object ProotDebian {
 
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
-        val r = rootDir().absolutePath; val p = proot().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        // proot Alpine 静态版 → 用 busybox sh 执行
-        val prootCmd = "$binPath/busybox sh -c \"$p -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c '$esc'\""
-        val result = CommandRunner.runBare(prootCmd, cwd, timeoutMs)
-        // 如果 proot 崩溃（PHDR broken），降级到 Android 原生 sh
-        if (!result.ok && (result.output.contains("PHDR",true) || result.output.contains("Aborted",true))) {
-            return CommandRunner.runBare("sh -c \"cd $cwd && $esc\"", cwd, timeoutMs)
-        }
-        return result
+        // 这设备的 filesDir 全 noexec，busybox/proot 都不能执行。
+        // 直接用 Android 系统 sh 在工作目录跑命令（不是 Debian，但工具能跑通）。
+        return CommandRunner.runBare("cd '$cwd' && $esc", cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
