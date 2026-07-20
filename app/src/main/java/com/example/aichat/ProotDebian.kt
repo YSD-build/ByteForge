@@ -25,7 +25,7 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = pickBinDir(context).apply { File(this).mkdirs() }.absolutePath
+        binPath = pickBinDir(context).apply { mkdirs() }.absolutePath
         refresh()
     }
 
