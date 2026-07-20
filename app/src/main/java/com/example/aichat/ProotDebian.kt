@@ -75,13 +75,52 @@ object ProotDebian {
                 rootDir().mkdirs()
                 val archive = File(context.cacheDir, "debian-rootfs.tar.xz")
                 copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
-                val r = CommandRunner.runBare(
+
+                // 尝试 xz 和 gzip 两种压缩
+                var r = CommandRunner.runBare(
                     "${busybox().absolutePath} tar -xJf ${archive.absolutePath} -C ${rootDir().absolutePath}",
                     filesPath, 600_000
                 )
-                archive.delete()
                 if (!r.ok) {
-                    _progress.value = "解压失败：${r.output}"
+                    _progress.value = "xz 解压失败，尝试 gzip…"
+                    r = CommandRunner.runBare(
+                        "${busybox().absolutePath} tar -xzf ${archive.absolutePath} -C ${rootDir().absolutePath}",
+                        filesPath, 600_000
+                    )
+                }
+                archive.delete()
+
+                // 诊断：列出解压产物
+                val listing = CommandRunner.runBare(
+                    "${busybox().absolutePath} ls -la ${rootDir().absolutePath}/",
+                    filesPath, 10_000
+                ).output.take(500)
+                val listingDeep = CommandRunner.runBare(
+                    "${busybox().absolutePath} find ${rootDir().absolutePath}/ -maxdepth 3 -type d 2>/dev/null | head -30",
+                    filesPath, 10_000
+                ).output
+
+                if (!r.ok) {
+                    _progress.value = "解压失败：${r.output}\n目录内容：$listing"
+                    _state.value = State.ERROR
+                    return@withContext false
+                }
+
+                // 如果文件被包在一层目录里，挪出来
+                val topDirs = rootDir().listFiles()?.filter { it.isDirectory } ?: emptyList()
+                if (topDirs.size == 1 && topDirs[0].name != "bin" && topDirs[0].name != "usr") {
+                    val inner = topDirs[0]
+                    _progress.value = "整理目录结构…"
+                    CommandRunner.runBare(
+                        "${busybox().absolutePath} mv ${inner.absolutePath}/* ${inner.absolutePath}/.* ${rootDir().absolutePath}/ 2>/dev/null; ${busybox().absolutePath} rmdir ${inner.absolutePath} 2>/dev/null",
+                        filesPath, 30_000
+                    )
+                }
+
+                // 如果仍是空的，打详细日志
+                if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
+                    @Suppress("UNUSED_VARIABLE") val debug = listingDeep
+                    _progress.value = "解压后无 usr/bin 目录。\ntar 输出：${r.output.take(200)}\n"
                     _state.value = State.ERROR
                     return@withContext false
                 }
