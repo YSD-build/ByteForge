@@ -43,13 +43,17 @@ object ProotDebian {
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
     private fun ensureBins(context: Context) {
-        val bb = busybox(); val pr = proot()
+        val bb = busybox(); val pr = proot(); val talloc = File(binPath, "libtalloc.so.2")
         val expectedBB = 1_116_400L; val expectedPR = 235_992L
         // 大小不匹配（损坏/老版本残留/非 PIE→动态链接）就强制重新复制
         if (bb.exists() && bb.length() != expectedBB) bb.delete()
         if (pr.exists() && pr.length() != expectedPR) pr.delete()
         if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
         if (!pr.exists()) copyAsset(context, "proot", pr.absolutePath)
+        // 复制 libtalloc（proot 动态链接依赖，jniLibs 的版本 Android 不会自动给 process 用）
+        if (!talloc.exists() || talloc.length() != 67_400L) {
+            try { context.assets.open("libtalloc.so.2").use { i -> FileOutputStream(talloc).use { o -> i.copyTo(o) } } } catch (_: Exception) {}
+        }
     }
 
     /** 验证二进制文件头四个字节是 ELF magic `7f 45 4c 46` */
@@ -172,9 +176,14 @@ object ProotDebian {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
         val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        // 尝试直接执行（jniLibs 已处理可执行路径），回退 linker64
+        // 动态链接 proot 需要找 libtalloc.so.2，Android 不会默认搜 jniLibs，必须显式指定 LD_LIBRARY_PATH
         val linker = if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
-        return CommandRunner.runBare("$linker ${proot().absolutePath} proot -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
+        return CommandRunner.runBareEnv(
+            listOf(linker, proot().absolutePath, "proot", "-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys",
+                "-b", "/data:/data", "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc),
+            mapOf("LD_LIBRARY_PATH" to binPath, "PATH" to "/system/bin"),
+            cwd, timeoutMs
+        )
     }
 
     fun isHighRisk(cmd: String): Boolean {

@@ -27,6 +27,17 @@ object CommandRunner {
         }
     }
 
+    /** 带环境变量的命令执行 */
+    fun runBareEnv(args: List<String>, env: Map<String, String>, workDir: String, timeoutMs: Long = 30_000): ToolResult {
+        return try {
+            val pb = ProcessBuilder(args).directory(File(workDir)).redirectErrorStream(true)
+            env.forEach { (k, v) -> pb.environment()[k] = v }
+            exec(pb, timeoutMs)
+        } catch (e: Exception) {
+            ToolResult(false, "命令执行失败：${e.message}")
+        }
+    }
+
     private fun exec(pb: ProcessBuilder, timeoutMs: Long): ToolResult {
         val proc = pb.start()
         val out = StringBuilder()
