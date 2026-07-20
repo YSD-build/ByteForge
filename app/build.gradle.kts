@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.aichat"
         minSdk = 24
         targetSdk = 34
-        versionCode = 12
-        versionName = "2.1.6"
+        versionCode = 13
+        versionName = "2.1.7"
     }
 
     buildTypes {
