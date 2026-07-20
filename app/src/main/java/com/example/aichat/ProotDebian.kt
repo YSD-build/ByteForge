@@ -44,8 +44,8 @@ object ProotDebian {
 
     private fun ensureBins(context: Context) {
         val bb = busybox(); val pr = proot()
-        val expectedBB = 1_116_400L; val expectedPR = 402_632L
-        // 大小不匹配（损坏/老版本残留）就强制重新复制
+        val expectedBB = 1_116_400L; val expectedPR = 235_992L
+        // 大小不匹配（损坏/老版本残留/非 PIE→动态链接）就强制重新复制
         if (bb.exists() && bb.length() != expectedBB) bb.delete()
         if (pr.exists() && pr.length() != expectedPR) pr.delete()
         if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
