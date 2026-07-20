@@ -106,8 +106,14 @@ object ProotDebian {
                     topDirs[0].deleteRecursively()
                 }
 
+                // 诊断：列出解压产物
+                val lsCmd = "$linker ${busybox().absolutePath} ls ls -la $r/"
+                val lsOut = CommandRunner.runBare(lsCmd, filesPath, 10_000).output.take(400)
+                val findOut = CommandRunner.runBare("$linker ${busybox().absolutePath} find find $r -maxdepth 2 -type d", filesPath, 10_000).output.take(600)
+
                 if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
-                    _progress.value = "解压后无 usr/bin 目录。"; _state.value = State.ERROR; notify(context, false, "解压后无 usr/bin"); return@withContext false
+                    _progress.value = "解压后无 usr/bin。tar退出=${result.ok}\n目录列表:\n$lsOut\n\n目录树:\n$findOut"
+                    _state.value = State.ERROR; return@withContext false
                 }
             }
 
