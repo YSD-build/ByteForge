@@ -40,12 +40,8 @@ object ProotDebian {
         refresh()
     }
 
-    /** 可执行目录：外存优先（通常不设 noexec），否则 filesDir/bin */
-    private fun getBinDir(ctx: Context): File {
-        val ext = ctx.getExternalFilesDir(null)
-        if (ext != null && ext.exists()) return File(ext, "toolbin")
-        return File(filesPath, "bin")
-    }
+    /** 可执行目录：Android 安装时自动把 jniLibs/*.so 解到 nativeLibraryDir，天然可执行 */
+    private fun getBinDir(ctx: Context): File = File(ctx.applicationInfo.nativeLibraryDir)
 
     /** 用 ProcessBuilder 直接执行二进制（不走 shell，避免 linker64 兼容问题） */
     private fun execBin(tool: String, bin: File, args: List<String>, cwd: String, timeoutMs: Long): ToolResult =
@@ -54,8 +50,8 @@ object ProotDebian {
         execBin(tool, busybox(), args, cwd, timeoutMs)
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
-    private fun proot()   = File(binPath, "proot")
-    private fun busybox() = File(binPath, "busybox")
+    private fun proot()   = File(binPath, "libproot_bf.so")
+    private fun busybox() = File(binPath, "libbusybox_bf.so")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
     fun isReady(): Boolean {
@@ -78,14 +74,7 @@ object ProotDebian {
             binPath = getBinDir(context).apply { mkdirs() }.absolutePath
             _state.value = State.COPYING
 
-            if (!busybox().exists()) {
-                _progress.value = "复制 busybox…"
-                copyAsset(context, "busybox", busybox().absolutePath)
-            }
-            if (!proot().exists()) {
-                _progress.value = "复制 proot…"
-                copyAsset(context, "proot", proot().absolutePath)
-            }
+            // busybox 和 proot 已在 jniLibs 中，安装时自动解到 nativeLibraryDir，无需复制
 
             if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
                 _state.value = State.EXTRACTING
