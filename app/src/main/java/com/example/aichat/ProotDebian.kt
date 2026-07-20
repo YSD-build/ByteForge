@@ -43,8 +43,23 @@ object ProotDebian {
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
     private fun ensureBins(context: Context) {
-        if (!busybox().exists()) copyAsset(context, "busybox", busybox().absolutePath)
-        if (!proot().exists()) copyAsset(context, "proot", proot().absolutePath)
+        val bb = busybox(); val pr = proot()
+        val expectedBB = 1_116_400L; val expectedPR = 402_632L
+        // 大小不匹配（损坏/老版本残留）就强制重新复制
+        if (bb.exists() && bb.length() != expectedBB) bb.delete()
+        if (pr.exists() && pr.length() != expectedPR) pr.delete()
+        if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
+        if (!pr.exists()) copyAsset(context, "proot", pr.absolutePath)
+    }
+
+    /** 验证二进制文件头四个字节是 ELF magic `7f 45 4c 46` */
+    private fun verifyElf(file: File, expected: String = "ELF") {
+        if (!file.exists()) throw RuntimeException("$file 不存在")
+        val head = ByteArray(4)
+        FileInputStream(file).use { it.read(head); it.close() }
+        val hex = head.joinToString("") { "%02x".format(it) }
+        val good = head[0] == 0x7F.toByte() && head[1] == 'E'.code.toByte() && head[2] == 'L'.code.toByte() && head[3] == 'F'.code.toByte()
+        if (!good) throw RuntimeException("$file 不是合法 $expected 二进制 (头4字节: $hex)")
     }
 
     fun isReady(): Boolean {
@@ -61,6 +76,7 @@ object ProotDebian {
             binPath = filesPath + "/bin"
             File(binPath).mkdirs()
             ensureBins(context)
+            verifyElf(busybox()); verifyElf(proot())
             _state.value = State.COPYING
 
             if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
