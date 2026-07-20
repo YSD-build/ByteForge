@@ -35,9 +35,16 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = File(filesPath, "bin").apply { mkdirs() }.absolutePath
+        binPath = getBinDir(context).apply { mkdirs() }.absolutePath
         createNotifyChannel(context)
         refresh()
+    }
+
+    /** 可执行目录：外存优先（通常不设 noexec），否则 filesDir/bin */
+    private fun getBinDir(ctx: Context): File {
+        val ext = ctx.getExternalFilesDir(null)
+        if (ext != null && ext.exists()) return File(ext, "toolbin")
+        return File(filesPath, "bin")
     }
 
     /** 用 ProcessBuilder 直接执行二进制（不走 shell，避免 linker64 兼容问题） */
@@ -68,7 +75,7 @@ object ProotDebian {
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
         try {
             filesPath = context.filesDir.absolutePath
-            binPath = File(filesPath, "bin").apply { mkdirs() }.absolutePath
+            binPath = getBinDir(context).apply { mkdirs() }.absolutePath
             _state.value = State.COPYING
 
             if (!busybox().exists()) {
