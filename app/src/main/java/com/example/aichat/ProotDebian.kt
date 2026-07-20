@@ -48,13 +48,13 @@ object ProotDebian {
             // 1. busybox
             if (!busybox().exists()) {
                 _progress.value = "复制 busybox…"
-                copyAsset(context, "busybox", busybox())
+                copyAsset(context, "busybox", busybox().absolutePath)
                 busybox().setExecutable(true)
             }
             // 2. proot
             if (!proot().exists()) {
                 _progress.value = "复制 proot…"
-                copyAsset(context, "proot", proot())
+                copyAsset(context, "proot", proot().absolutePath)
                 proot().setExecutable(true)
             }
 
