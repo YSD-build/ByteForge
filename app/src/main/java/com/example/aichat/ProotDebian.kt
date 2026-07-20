@@ -174,19 +174,16 @@ object ProotDebian {
 
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
-        val r = rootDir().absolutePath
+        val r = rootDir().absolutePath; val p = proot().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        // 动态链接 proot 需要找 libtalloc.so.2，Android 不会默认搜 jniLibs，必须显式指定 LD_LIBRARY_PATH
-        val linker = if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
-        return CommandRunner.runBareEnv(
-            listOf(linker, proot().absolutePath, "proot", "-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys",
-                "-b", "/data:/data", "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc),
-            mapOf(
-                "LD_LIBRARY_PATH" to "$binPath:/system/lib64:/system/lib",
-                "PATH" to "/system/bin"
-            ),
-            cwd, timeoutMs
-        )
+        // proot Alpine 静态版 → 用 busybox sh 执行
+        val prootCmd = "$binPath/busybox sh -c \"$p -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c '$esc'\""
+        val result = CommandRunner.runBare(prootCmd, cwd, timeoutMs)
+        // 如果 proot 崩溃（PHDR broken），降级到 Android 原生 sh
+        if (!result.ok && (result.output.contains("PHDR",true) || result.output.contains("Aborted",true))) {
+            return CommandRunner.runBare("sh -c \"cd $cwd && $esc\"", cwd, timeoutMs)
+        }
+        return result
     }
 
     fun isHighRisk(cmd: String): Boolean {

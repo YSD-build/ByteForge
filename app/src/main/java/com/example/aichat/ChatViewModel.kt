@@ -220,7 +220,6 @@ class ChatViewModel(
                         updateAssistant {
                             copy(
                                 content = full.toString().ifBlank { "（无输出）" },
-                                reasoningContent = reasoningSb.toString(),
                                 durationMs = System.currentTimeMillis() - startedAt
                             )
                         }
@@ -231,10 +230,13 @@ class ChatViewModel(
                     }
                     noActionStreak = 0
                     val (action, thinking) = parsed
+                    // thinking 字段混有推理内容——只显示真正跟动作相关的部分
+                    val cleanThinking = thinking.lines()
+                        .filter { !it.startsWith("思考：") && !it.startsWith("思考:") && it.isNotBlank() }
+                        .joinToString("\n").trim()
                     updateAssistant {
                         copy(
-                            content = thinking.ifBlank { "（已执行动作）" },
-                            reasoningContent = reasoningSb.toString(),
+                            content = cleanThinking.ifBlank { "（已执行动作）" },
                             durationMs = System.currentTimeMillis() - startedAt
                         )
                     }
