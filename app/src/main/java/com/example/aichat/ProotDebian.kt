@@ -31,8 +31,19 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = context.applicationInfo.nativeLibraryDir
+        binPath = findJniLibDir(context)
         createNotifyChannel(context)
+    }
+
+    private fun findJniLibDir(context: Context): String {
+        val native = context.applicationInfo.nativeLibraryDir
+        if (File(native, "libproot_bf.so").exists()) return native
+        val installDir = File(context.applicationInfo.sourceDir).parentFile?.parentFile?.absolutePath
+            ?: native
+        for (d in File("$installDir/lib").listFiles().orEmpty()) {
+            if (d.isDirectory && File(d, "libproot_bf.so").exists()) return d.absolutePath
+        }
+        return native
     }
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
