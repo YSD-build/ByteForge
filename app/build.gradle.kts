@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.aichat"
         minSdk = 24
         targetSdk = 34
-        versionCode = 19
-        versionName = "2.1.13"
+        versionCode = 20
+        versionName = "2.1.14"
     }
 
     buildTypes {
@@ -65,6 +65,7 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("org.tukaani:xz:1.9")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

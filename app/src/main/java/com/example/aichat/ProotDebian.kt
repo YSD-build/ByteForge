@@ -10,8 +10,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
+import org.tukaani.xz.XZInputStream
+import java.io.*
+import java.util.zip.GZIPInputStream
 
 object ProotDebian {
 
@@ -30,33 +31,21 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = context.filesDir.absolutePath + "/bin"
+        binPath = filesPath + "/bin"
         File(binPath).mkdirs()
         createNotifyChannel(context)
         refresh()
     }
 
-    /** 首次调用时从 assets 复制 busybox/proot 到 filesDir/bin，再用 linker64 执行 */
-    private fun ensureBins(context: Context) {
-        val bb = busybox(); val pr = proot()
-        if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
-        if (!pr.exists()) copyAsset(context, "proot", pr.absolutePath)
-    }
-
-    /** linker64 执行二进制，绕过 noexec——兼容各种设备 */
-    private fun ldr(cmd: String, cwd: String, timeoutMs: Long): ToolResult {
-        val linker = if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
-        return CommandRunner.runBare("$linker $cmd", cwd, timeoutMs)
-    }
-
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
-
     private fun proot()   = File(binPath, "proot")
     private fun busybox() = File(binPath, "busybox")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
-    private fun execBB(tool: String, args: String, cwd: String, timeoutMs: Long) =
-        ldr("${busybox().absolutePath} $tool $args", cwd, timeoutMs)
+    private fun ensureBins(context: Context) {
+        if (!busybox().exists()) copyAsset(context, "busybox", busybox().absolutePath)
+        if (!proot().exists()) copyAsset(context, "proot", proot().absolutePath)
+    }
 
     fun isReady(): Boolean {
         if (filesPath.isEmpty() || binPath.isEmpty()) return false
@@ -74,39 +63,11 @@ object ProotDebian {
             ensureBins(context)
             _state.value = State.COPYING
 
-            // busybox/proot 已在 jniLibs 中，安装时自动解到 nativeLibraryDir
-
             if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
                 _state.value = State.EXTRACTING
                 _progress.value = "解压 Debian 11 rootfs（约 400MB，需 3-5 分钟）…"
                 rootDir().mkdirs()
-                val archive = File(context.cacheDir, "debian-rootfs.tar.xz")
-                copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
-                val a = archive.absolutePath; val r = rootDir().absolutePath
-
-                var result = execBB("tar", "-xJf $a -C $r", filesPath, 600_000)
-                if (!result.ok) {
-                    _progress.value = "xz 失败，试 gzip…"
-                    result = execBB("tar", "-xzf $a -C $r", filesPath, 600_000)
-                }
-                archive.delete()
-                if (!result.ok) {
-                    _progress.value = "解压失败：${result.output.take(300)}"
-                    _state.value = State.ERROR; return@withContext false
-                }
-
-                val topDirs = rootDir().listFiles()?.filter { it.isDirectory } ?: emptyList()
-                if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
-                    _progress.value = "整理目录…"
-                    execBB("sh", "-c 'cp -a \"${topDirs[0].absolutePath}\"/* \"$r/\" && rmdir \"${topDirs[0].absolutePath}\"'", filesPath, 60_000)
-                }
-
-                val lsOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "ls", "-la", r), filesPath, 10_000).output.take(400)
-                val findOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "find", r, "-maxdepth", "2", "-type", "d"), filesPath, 10_000).output.take(600)
-                if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
-                    _progress.value = "解压后无 usr/bin。tar退出=${result.ok}\n$lsOut\n\n$findOut"
-                    _state.value = State.ERROR; return@withContext false
-                }
+                extractRootfs(context)
             }
 
             val ok = isReady()
@@ -119,11 +80,85 @@ object ProotDebian {
         }
     }
 
+    /** 纯 Java 解压 rootfs.tar.xz — 不执行任何外部二进制 */
+    private fun extractRootfs(context: Context) {
+        val r = rootDir()
+        // 先试 xz
+        val xz = try { XZInputStream(context.assets.open("debian-rootfs.tar.xz")) }
+            catch (_: Exception) { null }
+        val input: InputStream = xz ?: run {
+            // 回退 gzip
+            GZIPInputStream(context.assets.open("debian-rootfs.tar.xz"))
+        }
+        input.use { untar(it, r) }
+
+        // 子目录扁平化
+        val topDirs = r.listFiles()?.filter { it.isDirectory } ?: emptyList()
+        if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
+            _progress.value = "整理目录…"
+            topDirs[0].listFiles()?.forEach { f ->
+                f.renameTo(File(r, f.name))
+            }
+            topDirs[0].delete()
+        }
+
+        if (!File(r, "usr/bin").exists() && !File(r, "bin").exists()) {
+            val lsDirs = r.listFiles()?.map { "${if(it.isDirectory)"D" else "F"} ${it.name}" }?.joinToString("\n") ?: "(空)"
+            throw RuntimeException("解压后无 usr/bin。根目录内容:\n$lsDirs")
+        }
+    }
+
+    /** 纯 Java tar 解析并解压到 dest 目录 */
+    private fun untar(input: InputStream, dest: File) {
+        val buf = ByteArray(512)
+        var totalFiles = 0
+        while (true) {
+            var n = 0; while (n < 512) { val r = input.read(buf, n, 512 - n); if (r < 0) break; n += r }
+            if (n < 512) break
+            val name = String(buf, 0, 100).trimEnd('\u0000')
+            if (name.isEmpty()) break // end of archive
+            val type = buf[156]
+            val sizeStr = String(buf, 124, 12).trimEnd('\u0000', ' ')
+            val size  = sizeStr.toLongOrNull(8) ?: 0L
+            val padded = ((size + 511L) / 512L) * 512L
+            if (totalFiles == 0) _progress.value = "解压中: $name"
+
+            val entry = File(dest, name.removePrefix("./"))
+            when (type.toInt()) {
+                '5'.code -> { entry.mkdirs(); skip(input, padded) }
+                '0'.code, 0 -> {
+                    entry.parentFile?.mkdirs()
+                    FileOutputStream(entry).use { out ->
+                        var remain = size; val dbuf = ByteArray(8192)
+                        while (remain > 0) {
+                            val chunk = input.read(dbuf, 0, minOf(remain, dbuf.size.toLong()).toInt())
+                            if (chunk < 0) break; out.write(dbuf, 0, chunk); remain -= chunk
+                        }
+                    }
+                    skip(input, padded - size)
+                }
+                else -> skip(input, padded) // skip symlinks etc
+            }
+            if (totalFiles++ % 1000 == 0) _progress.value = "解压中: ${totalFiles} 文件…"
+        }
+        _progress.value = "解压完成：$totalFiles 文件"
+    }
+
+    private fun skip(input: InputStream, count: Long) {
+        var s = 0L; val buf = ByteArray(8192)
+        while (s < count) { val r = input.read(buf, 0, minOf(count - s, buf.size.toLong()).toInt()); if (r < 0) break; s += r }
+    }
+
+    private fun String.toLongOrNull(radix: Int): Long? =
+        runCatching { trim().takeIf { it.isNotEmpty() }?.toLong(radix) }.getOrNull()
+
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
         val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        return ldr("${proot().absolutePath} proot -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
+        // 尝试直接执行（jniLibs 已处理可执行路径），回退 linker64
+        val linker = if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
+        return CommandRunner.runBare("$linker ${proot().absolutePath} proot -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
