@@ -290,11 +290,6 @@ fun MessageBubble(msg: ChatMessage) {
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Column(modifier = Modifier.fillMaxWidth(0.82f)) {
-            // 深度思考的推理过程卡片（始终开启）
-            if (!isUser && msg.reasoningContent.isNotBlank()) {
-                ReasoningCard(text = msg.reasoningContent)
-                Spacer(Modifier.height(4.dp))
-            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -204,15 +204,8 @@ class ChatViewModel(
                             s.baseUrl, s.apiKey, s.model, reqHistory.toList(), s.temperature
                         ).cancellable().collect { ev ->
                             when (ev) {
-                                is StreamEvent.Reasoning -> {
-                                    reasoningSb.append(ev.text)
-                                    full.append(ev.text)
-                                    updateAssistant { copy(reasoningContent = reasoningSb.toString(), content = full.toString()) }
-                                }
-                                is StreamEvent.Content -> {
-                                    full.append(ev.text)
-                                    updateAssistant { copy(content = full.toString()) }
-                                }
+                                is StreamEvent.Reasoning -> reasoningSb.append(ev.text)
+                                is StreamEvent.Content -> full.append(ev.text)
                                 is StreamEvent.Done -> usage = ev.usage
                             }
                         }
