@@ -38,10 +38,21 @@ object ProotDebian {
     private fun findJniLibDir(context: Context): String {
         val native = context.applicationInfo.nativeLibraryDir
         if (File(native, "libproot_bf.so").exists()) return native
-        val installDir = File(context.applicationInfo.sourceDir).parentFile?.parentFile?.absolutePath
-            ?: native
-        for (d in File("$installDir/lib").listFiles().orEmpty()) {
-            if (d.isDirectory && File(d, "libproot_bf.so").exists()) return d.absolutePath
+        // 扫描多个候选路径
+        val sourceDir = File(context.applicationInfo.sourceDir)
+        val candidates = listOf(
+            sourceDir.parentFile,  // /data/app/~~/<pkg>-xxx/lib/
+            sourceDir.parentFile?.parentFile,  // /data/app/~~/lib/
+            File(context.filesDir.absolutePath).parentFile?.parentFile?.parentFile  // /data/...
+        )
+        for (base in candidates) {
+            if (base == null || !base.exists()) continue
+            val libDir = File(base, "lib")
+            if (libDir.isDirectory) {
+                for (d in libDir.listFiles().orEmpty()) {
+                    if (d.isDirectory && File(d, "libproot_bf.so").exists()) return d.absolutePath
+                }
+            }
         }
         return native
     }
