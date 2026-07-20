@@ -30,21 +30,33 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = context.applicationInfo.nativeLibraryDir
+        binPath = context.filesDir.absolutePath + "/bin"
+        File(binPath).mkdirs()
         createNotifyChannel(context)
         refresh()
     }
 
+    /** 首次调用时从 assets 复制 busybox/proot 到 filesDir/bin，再用 linker64 执行 */
+    private fun ensureBins(context: Context) {
+        val bb = busybox(); val pr = proot()
+        if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
+        if (!pr.exists()) copyAsset(context, "proot", pr.absolutePath)
+    }
+
+    /** linker64 执行二进制，绕过 noexec——兼容各种设备 */
+    private fun ldr(cmd: String, cwd: String, timeoutMs: Long): ToolResult {
+        val linker = if (File("/system/bin/linker64").exists()) "/system/bin/linker64" else "/system/bin/linker"
+        return CommandRunner.runBare("$linker $cmd", cwd, timeoutMs)
+    }
+
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
 
-    private fun proot()   = File(binPath, "libproot_bf.so")
-    private fun busybox() = File(binPath, "libbusybox_bf.so")
+    private fun proot()   = File(binPath, "proot")
+    private fun busybox() = File(binPath, "busybox")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
-    private fun execBin(tool: String, bin: File, args: List<String>, cwd: String, timeoutMs: Long): ToolResult =
-        CommandRunner.runArgs(listOf(bin.absolutePath, tool) + args, cwd, timeoutMs)
-    private fun execBB(tool: String, args: List<String>, cwd: String, timeoutMs: Long): ToolResult =
-        execBin(tool, busybox(), args, cwd, timeoutMs)
+    private fun execBB(tool: String, args: String, cwd: String, timeoutMs: Long) =
+        ldr("${busybox().absolutePath} $tool $args", cwd, timeoutMs)
 
     fun isReady(): Boolean {
         if (filesPath.isEmpty() || binPath.isEmpty()) return false
@@ -57,7 +69,9 @@ object ProotDebian {
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
         try {
             filesPath = context.filesDir.absolutePath
-            binPath = context.applicationInfo.nativeLibraryDir
+            binPath = filesPath + "/bin"
+            File(binPath).mkdirs()
+            ensureBins(context)
             _state.value = State.COPYING
 
             // busybox/proot 已在 jniLibs 中，安装时自动解到 nativeLibraryDir
@@ -70,10 +84,10 @@ object ProotDebian {
                 copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
                 val a = archive.absolutePath; val r = rootDir().absolutePath
 
-                var result = execBB("tar", listOf("-xJf", a, "-C", r), filesPath, 600_000)
+                var result = execBB("tar", "-xJf $a -C $r", filesPath, 600_000)
                 if (!result.ok) {
                     _progress.value = "xz 失败，试 gzip…"
-                    result = execBB("tar", listOf("-xzf", a, "-C", r), filesPath, 600_000)
+                    result = execBB("tar", "-xzf $a -C $r", filesPath, 600_000)
                 }
                 archive.delete()
                 if (!result.ok) {
@@ -84,7 +98,7 @@ object ProotDebian {
                 val topDirs = rootDir().listFiles()?.filter { it.isDirectory } ?: emptyList()
                 if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
                     _progress.value = "整理目录…"
-                    execBB("sh", listOf("-c", "cp -a '${topDirs[0].absolutePath}'/* '$r/' 2>/dev/null; rmdir '${topDirs[0].absolutePath}' 2>/dev/null"), filesPath, 60_000)
+                    execBB("sh", "-c 'cp -a \"${topDirs[0].absolutePath}\"/* \"$r/\" && rmdir \"${topDirs[0].absolutePath}\"'", filesPath, 60_000)
                 }
 
                 val lsOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "ls", "-la", r), filesPath, 10_000).output.take(400)
@@ -109,8 +123,7 @@ object ProotDebian {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
         val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        return execBin("proot", proot(), listOf("-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys",
-            "-b", "/data:/data", "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc), cwd, timeoutMs)
+        return ldr("${proot().absolutePath} proot -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
