@@ -1,25 +1,19 @@
 package com.example.aichat
 
 import android.content.Context
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.TimeUnit
 
 /**
  * ByteForge Debian 11 终端环境。
- * busybox 和 proot 二进制已预置在 APK assets 中，初始化时直接复制（零网络）。
- * 仅 Debian rootfs 需要下载（~120MB，从 LXC 镜像）。
+ * 所有组件（busybox / proot / Debian rootfs）均预置在 APK assets 中，
+ * 初始化时直接复制到本地，零网络请求。
  */
 object ProotDebian {
 
-    enum class State { NOT_INITIALIZED, DOWNLOADING, EXTRACTING, READY, ERROR }
+    enum class State { NOT_INITIALIZED, COPYING, EXTRACTING, READY, ERROR }
     val state: StateFlow<State> get() = _state
     private val _state = MutableStateFlow(State.NOT_INITIALIZED)
     val progress: StateFlow<String> get() = _progress
@@ -29,17 +23,6 @@ object ProotDebian {
     private var binDir = ""
     private var prootBin = ""
     private var busyboxBin = ""
-
-    // rootfs 下载源（LXC 官方 + 国内镜像）
-    private val rootfsMirrors = listOf(
-        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        "https://mirrors.aliyun.com/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        "https://mirrors.ustc.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz"
-    )
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS).readTimeout(900, TimeUnit.SECONDS).build()
 
     fun isReady(): Boolean =
         prootBin.isNotEmpty() && File(prootBin).exists() &&
@@ -53,39 +36,37 @@ object ProotDebian {
         rootfsDir = File(context.filesDir, "debian-rootfs").absolutePath
     }
 
-    /** 完整初始化：预置 busybox/proot 秒级就绪 → 下载解压 Debian rootfs */
+    /** 完全离线初始化：从 APK assets 复制所有组件，解压 rootfs */
     suspend fun initialize(context: Context): Boolean {
         try {
             prepareDirs(context)
-            _state.value = State.DOWNLOADING
+            _state.value = State.COPYING
 
-            // 1. 从 APK assets 复制 busybox（预置，零网络）
+            // 1. busybox（APK assets → filesDir，零网络）
             if (!File(busyboxBin).exists()) {
-                _progress.value = "解压 busybox…"
+                _progress.value = "复制 busybox…"
                 copyAsset(context, "busybox", busyboxBin)
                 File(busyboxBin).setExecutable(true)
             }
-            // 2. 从 APK assets 复制 proot（预置，零网络）
+            // 2. proot（APK assets → filesDir，零网络）
             if (!File(prootBin).exists()) {
-                _progress.value = "解压 proot…"
+                _progress.value = "复制 proot…"
                 copyAsset(context, "proot", prootBin)
                 File(prootBin).setExecutable(true)
             }
 
-            // 3. 下载并解压 Debian rootfs
+            // 3. Debian rootfs（APK assets 预置 87MB rootfs.tar.xz，解压 ~400MB）
             if (!File(rootfsDir, "bin").exists()) {
-                val archive = File(context.cacheDir, "debian-rootfs.tar.xz").absolutePath
-                if (!File(archive).exists()) {
-                    _progress.value = "下载 Debian 11 rootfs (~120MB)…"
-                    tryMirrors(archive)
-                }
                 _state.value = State.EXTRACTING
-                _progress.value = "解压 rootfs（约 400MB）…"
+                _progress.value = "解压 Debian 11 rootfs（约 400MB，需 3-5 分钟）…"
                 File(rootfsDir).mkdirs()
+                val archive = File(context.cacheDir, "debian-rootfs.tar.xz").absolutePath
+                copyAsset(context, "debian-rootfs.tar.xz", archive)
                 val r = CommandRunner.runBare(
                     "$busyboxBin tar -xJf $archive -C $rootfsDir",
                     context.filesDir.absolutePath, 600_000
                 )
+                File(archive).delete() // 释放缓存空间
                 if (!r.ok) { _state.value = State.ERROR; _progress.value = "解压失败：${r.output}"; return false }
             }
 
@@ -112,25 +93,6 @@ object ProotDebian {
     private fun copyAsset(context: Context, assetName: String, dest: String) {
         context.assets.open(assetName).use { input ->
             FileOutputStream(File(dest)).use { out -> input.copyTo(out) }
-        }
-    }
-
-    private suspend fun tryMirrors(dest: String) {
-        var last: String? = null
-        for ((i, url) in rootfsMirrors.withIndex()) {
-            _progress.value = "下载 rootfs（${i + 1}/${rootfsMirrors.size}）…"
-            try { downloadToFile(url, File(dest)); return } catch (e: Exception) { last = e.message }
-        }
-        throw RuntimeException("所有 rootfs 镜像下载失败：$last")
-    }
-
-    private suspend fun downloadToFile(url: String, dest: File) = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(url).build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
-            resp.body?.byteStream()?.use { input ->
-                FileOutputStream(dest).use { out -> input.copyTo(out) }
-            } ?: throw RuntimeException("空响应体")
         }
     }
 }

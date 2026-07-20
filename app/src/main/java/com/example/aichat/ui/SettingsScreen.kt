@@ -171,8 +171,8 @@ fun SettingsScreen(
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = when (debState) {
-                            ProotDebian.State.NOT_INITIALIZED -> "未初始化 — 下载约 120 MB rootfs（解压后 ~400 MB）"
-                            ProotDebian.State.DOWNLOADING -> "⏳ $debProgress"
+                            ProotDebian.State.NOT_INITIALIZED -> "未初始化 — 所有组件已预置，解压后约 400 MB"
+                            ProotDebian.State.COPYING -> "⏳ $debProgress"
                             ProotDebian.State.EXTRACTING -> "📦 $debProgress"
                             ProotDebian.State.READY -> "✅ Debian 11 终端就绪"
                             ProotDebian.State.ERROR -> "⚠️ 初始化失败：${debProgress.ifBlank { "请重试" }}"
@@ -180,7 +180,7 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    val initReady = debState != ProotDebian.State.DOWNLOADING && debState != ProotDebian.State.EXTRACTING
+                    val initReady = debState != ProotDebian.State.COPYING && debState != ProotDebian.State.EXTRACTING
                     if (debState != ProotDebian.State.READY) {
                         Spacer(Modifier.height(12.dp))
                         Button(onClick = { scope.launch { ProotDebian.initialize(context) } }, enabled = initReady) {
