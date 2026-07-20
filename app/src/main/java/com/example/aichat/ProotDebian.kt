@@ -7,9 +7,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * ByteForge Debian 11 终端环境。
- * 所有组件（busybox / proot / Debian rootfs）均预置在 APK assets 中，
- * 初始化时直接复制到本地，零网络请求。
+ * ByteForge Debian 11 终端环境。所有组件预置在 APK assets，零网络。
  */
 object ProotDebian {
 
@@ -19,54 +17,59 @@ object ProotDebian {
     val progress: StateFlow<String> get() = _progress
     private val _progress = MutableStateFlow("")
 
-    private var rootfsDir = ""
-    private var binDir = ""
-    private var prootBin = ""
-    private var busyboxBin = ""
+    // 持久化记录：App 重启后能从 filesDir 推断状态
+    private var filesPath = ""
+    @Volatile private var stateInited = false
 
-    fun isReady(): Boolean =
-        prootBin.isNotEmpty() && File(prootBin).exists() &&
-        busyboxBin.isNotEmpty() && File(busyboxBin).exists() &&
-        rootfsDir.isNotEmpty() && File(rootfsDir, "bin").exists()
-
-    fun prepareDirs(context: Context) {
-        binDir = File(context.filesDir, "bin").apply { mkdirs() }.absolutePath
-        prootBin = File(binDir, "proot").absolutePath
-        busyboxBin = File(binDir, "busybox").absolutePath
-        rootfsDir = File(context.filesDir, "debian-rootfs").absolutePath
+    /** 初始化状态流（App 启动时调用一次，读取已存在的文件系统状态） */
+    fun initState(context: Context) {
+        if (stateInited) return
+        stateInited = true
+        filesPath = context.filesDir.absolutePath
+        _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED
     }
+
+    private fun binDir()  = File(filesPath, "bin")
+    private fun proot()   = File(binDir(), "proot")
+    private fun busybox() = File(binDir(), "busybox")
+    private fun rootDir() = File(filesPath, "debian-rootfs")
+
+    fun isReady(): Boolean = filesPath.isNotEmpty()
+            && proot().exists() && busybox().exists()
+            && File(rootDir(), "bin").exists()
 
     /** 完全离线初始化：从 APK assets 复制所有组件，解压 rootfs */
     suspend fun initialize(context: Context): Boolean {
         try {
-            prepareDirs(context)
+            filesPath = context.filesDir.absolutePath
+            binDir().mkdirs()
             _state.value = State.COPYING
 
-            // 1. busybox（APK assets → filesDir，零网络）
-            if (!File(busyboxBin).exists()) {
+            // 1. busybox
+            if (!busybox().exists()) {
                 _progress.value = "复制 busybox…"
-                copyAsset(context, "busybox", busyboxBin)
-                File(busyboxBin).setExecutable(true)
+                copyAsset(context, "busybox", busybox())
+                busybox().setExecutable(true)
             }
-            // 2. proot（APK assets → filesDir，零网络）
-            if (!File(prootBin).exists()) {
+            // 2. proot
+            if (!proot().exists()) {
                 _progress.value = "复制 proot…"
-                copyAsset(context, "proot", prootBin)
-                File(prootBin).setExecutable(true)
+                copyAsset(context, "proot", proot())
+                proot().setExecutable(true)
             }
 
-            // 3. Debian rootfs（APK assets 预置 87MB rootfs.tar.xz，解压 ~400MB）
-            if (!File(rootfsDir, "bin").exists()) {
+            // 3. Debian rootfs（从 assets 复制 tar.xz → 解压）
+            if (!File(rootDir(), "bin").exists()) {
                 _state.value = State.EXTRACTING
                 _progress.value = "解压 Debian 11 rootfs（约 400MB，需 3-5 分钟）…"
-                File(rootfsDir).mkdirs()
-                val archive = File(context.cacheDir, "debian-rootfs.tar.xz").absolutePath
-                copyAsset(context, "debian-rootfs.tar.xz", archive)
+                rootDir().mkdirs()
+                val archive = File(context.cacheDir, "debian-rootfs.tar.xz")
+                copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
                 val r = CommandRunner.runBare(
-                    "$busyboxBin tar -xJf $archive -C $rootfsDir",
-                    context.filesDir.absolutePath, 600_000
+                    "${busybox().absolutePath} tar -xJf ${archive.absolutePath} -C ${rootDir().absolutePath}",
+                    filesPath, 600_000
                 )
-                File(archive).delete() // 释放缓存空间
+                archive.delete()
                 if (!r.ok) { _state.value = State.ERROR; _progress.value = "解压失败：${r.output}"; return false }
             }
 
@@ -78,8 +81,9 @@ object ProotDebian {
 
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
+        val p = proot().absolutePath; val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        val full = "$prootBin -r $rootfsDir -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\""
+        val full = "$p -r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\""
         return CommandRunner.runBare(full, cwd, timeoutMs)
     }
 
@@ -88,11 +92,7 @@ object ProotDebian {
         return p.any { cmd.contains(it, true) }
     }
 
-    // ===== internal =====
-
-    private fun copyAsset(context: Context, assetName: String, dest: String) {
-        context.assets.open(assetName).use { input ->
-            FileOutputStream(File(dest)).use { out -> input.copyTo(out) }
-        }
+    private fun copyAsset(context: Context, asset: String, dest: String) {
+        context.assets.open(asset).use { i -> FileOutputStream(File(dest)).use { o -> i.copyTo(o) } }
     }
 }
