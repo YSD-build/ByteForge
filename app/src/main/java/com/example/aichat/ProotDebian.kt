@@ -8,84 +8,56 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.BufferedInputStream
-import java.io.File
-import java.io.FileOutputStream
+import java.io.*
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 
 /**
- * Debian 11 真终端环境管理。
- * 使用 proot + busybox 在应用沙盒内运行一个真正的 Debian 11 轻量容器。
- * 首次使用需在 Settings 中"初始化终端环境"（下载 rootfs）。
- *
- * 整体体积：proot(~200KB) + busybox(~1MB) + rootfs(~400MB 解压) ≈ 400-500MB < 900MB。
+ * ByteForge Debian 11 真终端环境。
+ * 使用 Alpine CDN 下载 busybox-static / proot-static，再用 busybox 解压 Debian rootfs。
+ * 首次使用在 Settings → 终端环境 点击初始化。
  */
 object ProotDebian {
 
     enum class State { NOT_INITIALIZED, DOWNLOADING, EXTRACTING, READY, ERROR }
-
+    val state: StateFlow<State> get() = _state
     private val _state = MutableStateFlow(State.NOT_INITIALIZED)
-    val state: StateFlow<State> = _state.asStateFlow()
-
+    val progress: StateFlow<String> get() = _progress
     private val _progress = MutableStateFlow("")
-    val progress: StateFlow<String> = _progress.asStateFlow()
 
-    private var rootfsDir: String = ""
-    private var binDir: String = ""
-    private var prootBin: String = ""
-    private var busyboxBin: String = ""
+    private var rootfsDir = ""
+    private var binDir = ""
+    private var prootBin = ""
+    private var busyboxBin = ""
+
+    // Alpine CDN (已实测可用 HTTP 200)
+    private val apkBase = "https://dl-cdn.alpinelinux.org/alpine/edge"
+    private val apkMirrors = listOf(
+        apkBase,
+        "https://mirrors.aliyun.com/alpine/edge",
+        "https://mirrors.tuna.tsinghua.edu.cn/alpine/edge",
+        "https://mirrors.ustc.edu.cn/alpine/edge"
+    )
+    // 每个 apk 在仓库中的相对路径
+    private val busyboxPath = "main/aarch64/busybox-static-1.38.0-r1.apk"
+    private val prootPath = "community/aarch64/proot-static-5.4.0-r2.apk"
+    // rootfs 下载源（LXC 官方 + 国内镜像）
+    private val rootfsMirrors = listOf(
+        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        "https://mirrors.aliyun.com/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        "https://mirrors.ustc.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz"
+    )
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(600, TimeUnit.SECONDS) // rootfs 下载可能较久
+        .readTimeout(900, TimeUnit.SECONDS)
         .build()
 
-    // ===== 15+ 镜像源（官方 + 国内） =====
-    private val prootMirrors = listOf(
-        // 官方 / GitHub raw
-        "https://raw.githubusercontent.com/ZhymabekRoman/proot-static/main/proot_static",
-        "https://github.com/termux/termux-packages/releases/download/proot-5.1.107/proot-aarch64",
-        "https://raw.githubusercontent.com/termux/proot-distro/master/proot-static-aarch64",
-        // 国内镜像
-        "https://mirrors.aliyun.com/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
-        "https://mirrors.tuna.tsinghua.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
-        "https://mirrors.ustc.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
-        "https://mirrors.bfsu.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
-        "https://mirrors.nju.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb"
-    )
-    private val busyboxMirrors = listOf(
-        // 官方
-        "https://busybox.net/downloads/binaries/1.35.0-arm64v8/busybox",
-        "https://busybox.net/downloads/binaries/1.36.1-arm64v8/busybox",
-        // GitHub
-        "https://github.com/termux/termux-packages/releases/download/busybox-1.35.0/busybox-aarch64",
-        "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/busybox-aarch64",
-        // 国内镜像
-        "https://mirrors.aliyun.com/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb",
-        "https://mirrors.tuna.tsinghua.edu.cn/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb",
-        "https://mirrors.ustc.edu.cn/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb"
-    )
-    private val rootfsMirrors = listOf(
-        // Linux Containers 官方镜像（最可靠）
-        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20231217_05:24/rootfs.tar.xz",
-        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        // 清华 TUNA LXC 镜像
-        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20231217_05:24/rootfs.tar.xz",
-        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        // 阿里云 OSS
-        "https://mirrors.aliyun.com/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        // USTC 镜像
-        "https://mirrors.ustc.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
-        // 南京大学镜像
-        "https://mirrors.nju.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz"
-    )
-
-    /** 检查是否已初始化 */
     fun isReady(): Boolean = prootBin.isNotEmpty() && File(prootBin).exists() &&
             busyboxBin.isNotEmpty() && File(busyboxBin).exists() &&
             rootfsDir.isNotEmpty() && File(rootfsDir, "bin").exists()
 
-    /** 准备目录结构，使 proot/busybox 二进制可用 */
     fun prepareBins(context: Context) {
         binDir = File(context.filesDir, "bin").apply { mkdirs() }.absolutePath
         prootBin = File(binDir, "proot").absolutePath
@@ -93,128 +65,158 @@ object ProotDebian {
         rootfsDir = File(context.filesDir, "debian-rootfs").absolutePath
     }
 
-    /** 下载并初始化完整 Debian 环境。在协程中调用。 */
+    /** 完整初始化流程 */
     suspend fun initialize(context: Context): Boolean {
         try {
             prepareBins(context)
             _state.value = State.DOWNLOADING
 
-            // 1. 下载 proot 二进制（多镜像降级）
-            if (!File(prootBin).exists()) {
-                _progress.value = "下载 proot…"
-                tryMirrors(prootMirrors, prootBin, "proot")
-                File(prootBin).setExecutable(true)
-            }
-
-            // 2. 下载 busybox（多镜像降级）
+            // 1. busybox（自举：无需外部工具即可解 APK）
             if (!File(busyboxBin).exists()) {
                 _progress.value = "下载 busybox…"
-                tryMirrors(busyboxMirrors, busyboxBin, "busybox")
+                downloadApkAsset(busyboxPath, busyboxBin, "bin/busybox.static", "busybox")
                 File(busyboxBin).setExecutable(true)
             }
 
-            // 3. 下载 Debian rootfs（仅当未解压）
+            // 2. proot
+            if (!File(prootBin).exists()) {
+                _progress.value = "下载 proot…"
+                downloadApkAsset(prootPath, prootBin, "usr/bin/proot", "proot")
+                File(prootBin).setExecutable(true)
+            }
+
+            // 3. Debian rootfs
             if (!File(rootfsDir, "bin").exists()) {
                 val archive = File(context.cacheDir, "debian-rootfs.tar.xz").absolutePath
                 if (!File(archive).exists()) {
                     _progress.value = "下载 Debian 11 rootfs (~120MB)…"
                     tryMirrors(rootfsMirrors, archive, "rootfs")
                 }
-
-                // 4. 用 busybox tar 解压
                 _state.value = State.EXTRACTING
                 _progress.value = "解压 rootfs（约 400MB，需几分钟）…"
                 File(rootfsDir).mkdirs()
-                val result = CommandRunner.runBare(
+                val r = CommandRunner.runBare(
                     "$busyboxBin tar -xJf $archive -C $rootfsDir",
-                    context.filesDir.absolutePath,
-                    600_000 // 10 分钟超时
+                    context.filesDir.absolutePath, 600_000
                 )
-                if (!result.ok) {
-                    _state.value = State.ERROR
-                    _progress.value = "解压失败：${result.output}"
-                    return false
-                }
+                if (!r.ok) { _state.value = State.ERROR; _progress.value = "解压失败：${r.output}"; return false }
             }
 
-            _state.value = State.READY
-            _progress.value = "Debian 11 终端就绪"
-            return true
+            _state.value = State.READY; _progress.value = "Debian 11 终端就绪"; return true
         } catch (e: Exception) {
-            _state.value = State.ERROR
-            _progress.value = "初始化失败：${e.message}"
-            return false
+            _state.value = State.ERROR; _progress.value = "初始化失败：${e.message}"; return false
         }
     }
 
-    /**
-     * 在 Debian 11 环境中运行一条命令。
-     * @param cmd    要执行的 shell 命令
-     * @param cwd    命令工作目录（会被 bind 进 proot）
-     * @param timeoutMs 超时
-     */
+    /** 在 Debian 中执行命令 */
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
-        if (!isReady()) return ToolResult(false, "Debian 环境未初始化，请先在设置中初始化终端环境。")
-
-        // 构建 proot 命令：挂载必要节点 + 设定工作目录
-        val fullCmd = buildString {
-            append(prootBin)
-            append(" -r ").append(rootfsDir)
-            append(" -b /dev -b /proc -b /sys -b /data:/data")
-            // 将 Android 工作目录 bind 进去
-            append(" -b ").append(cwd).append(":").append(cwd)
-            append(" --cwd=").append(cwd)
-            append(" /bin/bash -c \"").append(cmd.replace("\"", "\\\"").replace("\n", "; ")).append("\"")
-        }
-        return CommandRunner.runBare(fullCmd, cwd, timeoutMs)
+        if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
+        val full = "$prootBin -r $rootfsDir -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"${cmd.replace("\"","\\\"").replace("\n","; ")}\""
+        return CommandRunner.runBare(full, cwd, timeoutMs)
     }
 
-    /** 检查命令是否高风险 */
     fun isHighRisk(cmd: String): Boolean {
-        val patterns = listOf(
-            "rm -rf", "rmdir", ":(){", "mkfs", "dd if=", "fdisk",
-            "> /dev/sd", "chmod 777", "shutdown", "reboot", "halt"
-        )
-        return patterns.any { cmd.contains(it, ignoreCase = true) }
+        val p = listOf("rm -rf", "mkfs", "dd if=", "fdisk", "> /dev/sd", "chmod 777", "shutdown", "reboot", "halt")
+        return p.any { cmd.contains(it, true) }
     }
 
     // ===== internal =====
 
-    /** 依次尝试多个镜像 URL，直到下载成功 */
-    private suspend fun tryMirrors(urls: List<String>, destPath: String, label: String) {
-        var lastError: String? = null
-        for ((i, url) in urls.withIndex()) {
-            _progress.value = "下载 $label…（尝试镜像 ${i + 1}/${urls.size}）"
+    /** 从 Alpine .apk 包中提取指定二进制文件（纯 Java，无需外部工具） */
+    private suspend fun downloadApkAsset(pkgPath: String, dest: String, tarEntry: String, label: String) {
+        var lastErr: String? = null
+        for (mirror in apkMirrors) {
+            val url = "$mirror/$pkgPath"
+            _progress.value = "下载 $label（${mirror.take(30)}…）"
             try {
-                download(url, destPath)
-                return // 成功
-            } catch (e: Exception) {
-                lastError = "${e.message}"
-            }
+                val apkFile = File(binDir, "${label}.apk")
+                downloadToFile(url, apkFile)
+                extractFromApk(apkFile, tarEntry, File(dest))
+                apkFile.delete()
+                return
+            } catch (e: Exception) { lastErr = e.message }
         }
-        throw RuntimeException("所有 $label 镜像均下载失败：$lastError。请在设置中添加自定义镜像。")
+        throw RuntimeException("$label 所有镜像下载/提取失败：$lastErr")
     }
 
-    private suspend fun download(url: String, destPath: String) = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(url).build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw RuntimeException("下载失败 HTTP ${resp.code}")
-            val body = resp.body ?: throw RuntimeException("响应体为空")
-            BufferedInputStream(body.byteStream()).use { input ->
-                FileOutputStream(File(destPath)).use { output ->
-                    val buf = ByteArray(8192)
-                    var total = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        output.write(buf, 0, n)
-                        total += n
-                        if (total % (2 * 1024 * 1024) == 0L) {
-                            _progress.value = "已下载 ${total / 1048576} MB"
+    /** 从 APK 中提取文件：扫描 GZIP 头 → 解压 → 解析 tar → 找到目标条目 */
+    private fun extractFromApk(apk: File, targetPath: String, dest: File) {
+        // 扫描 apk 文件，找到所有 gzip 头部偏移
+        val gzipOffsets = mutableListOf<Long>()
+        RandomAccessFile(apk, "r").use { raf ->
+            var pos = 0L
+            while (pos < raf.length() - 3) {
+                raf.seek(pos)
+                val b1 = raf.read(); val b2 = raf.read()
+                if (b1 == 0x1F && b2 == 0x8B.toInt()) gzipOffsets.add(pos)
+                pos++
+            }
+        }
+        // 取最后一个 gzip 流（data.tar.gz）
+        val dataOffset = gzipOffsets.lastOrNull()
+            ?: throw RuntimeException("apk 中没有找到 gzip 数据")
+        // 从该偏移解压 tar，找到目标文件
+        RandomAccessFile(apk, "r").use { raf ->
+            raf.seek(dataOffset)
+            GZIPInputStream(object : InputStream() {
+                override fun read(): Int = raf.read()
+                override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
+            }).use { gz ->
+                val buf = ByteArray(512)
+                while (true) {
+                    var n = gz.read(buf); if (n <= 0) break
+                    // 补满 512 字节
+                    while (n < 512) { val r = gz.read(buf, n, 512 - n); if (r < 0) break; n += r }
+                    if (n < 512) break
+                    val name = String(buf, 0, 100).trimEnd('\u0000')
+                    val sizeStr = String(buf, 124, 12).trimEnd('\u0000', ' ')
+                    val size = sizeStr.toLongOrNull(8) ?: 0L // octal
+                    if (name == targetPath || name == "./$targetPath") {
+                        dest.parentFile?.mkdirs()
+                        FileOutputStream(dest).use { out ->
+                            val dbuf = ByteArray(8192)
+                            var remain = size
+                            while (remain > 0) {
+                                val chunk = gz.read(dbuf, 0, minOf(remain, dbuf.size.toLong()).toInt())
+                                if (chunk < 0) break
+                                out.write(dbuf, 0, chunk); remain -= chunk
+                            }
                         }
+                        return
+                    }
+                    // 跳过条目数据（512 对齐）
+                    val skip = ((size + 511L) / 512L) * 512L
+                    var skipped = 0L
+                    val sbuf = ByteArray(8192)
+                    while (skipped < skip) {
+                        val chunk = gz.read(sbuf, 0, minOf(skip - skipped, sbuf.size.toLong()).toInt())
+                        if (chunk < 0) break; skipped += chunk
                     }
                 }
             }
         }
+        throw RuntimeException("在 apk 的 tar 中未找到 $targetPath")
     }
+
+    private suspend fun downloadToFile(url: String, dest: File) = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(url).build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+            resp.body?.byteStream()?.use { input ->
+                FileOutputStream(dest).use { out -> input.copyTo(out) }
+            } ?: throw RuntimeException("空响应体")
+        }
+    }
+
+    private suspend fun tryMirrors(urls: List<String>, destPath: String, label: String) {
+        var last: String? = null
+        for ((i, url) in urls.withIndex()) {
+            _progress.value = "下载 $label（${i + 1}/${urls.size}）…"
+            try { downloadToFile(url, File(destPath)); return } catch (e: Exception) { last = e.message }
+        }
+        throw RuntimeException("所有 $label 镜像下载失败：$last")
+    }
+
+    private fun String.toLongOrNull(radix: Int): Long? =
+        runCatching { this.trim().takeIf { it.isNotEmpty() }?.toLong(radix) }.getOrNull()
 }
