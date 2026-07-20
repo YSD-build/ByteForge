@@ -31,29 +31,17 @@ object ProotDebian {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = filesPath + "/bin"
-        File(binPath).mkdirs()
+        binPath = context.applicationInfo.nativeLibraryDir
         createNotifyChannel(context)
-        refresh()
     }
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
-    private fun proot()   = File(binPath, "proot")
-    private fun busybox() = File(binPath, "busybox")
+    private fun proot()   = File(binPath, "libproot_bf.so")
+    private fun busybox() = File(binPath, "libbusybox_bf.so")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
     private fun ensureBins(context: Context) {
-        val bb = busybox(); val pr = proot(); val talloc = File(binPath, "libtalloc.so.2")
-        val expectedBB = 1_116_400L; val expectedPR = 235_992L
-        // 大小不匹配（损坏/老版本残留/非 PIE→动态链接）就强制重新复制
-        if (bb.exists() && bb.length() != expectedBB) bb.delete()
-        if (pr.exists() && pr.length() != expectedPR) pr.delete()
-        if (!bb.exists()) copyAsset(context, "busybox", bb.absolutePath)
-        if (!pr.exists()) copyAsset(context, "proot", pr.absolutePath)
-        // 复制 libtalloc（proot 动态链接依赖，jniLibs 的版本 Android 不会自动给 process 用）
-        if (!talloc.exists() || talloc.length() != 67_400L) {
-            try { context.assets.open("libtalloc.so.2").use { i -> FileOutputStream(talloc).use { o -> i.copyTo(o) } } } catch (_: Exception) {}
-        }
+        // jniLibs 里的二进制在系统安装时已自动解到 nativeLibraryDir，无需复制
     }
 
     /** 验证二进制文件头四个字节是 ELF magic `7f 45 4c 46` */
@@ -77,8 +65,7 @@ object ProotDebian {
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
         try {
             filesPath = context.filesDir.absolutePath
-            binPath = filesPath + "/bin"
-            File(binPath).mkdirs()
+            binPath = context.applicationInfo.nativeLibraryDir
             ensureBins(context)
             verifyElf(busybox()); verifyElf(proot())
             _state.value = State.COPYING
@@ -174,10 +161,19 @@ object ProotDebian {
 
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
+        val r = rootDir().absolutePath; val p = proot().absolutePath
+        val loader = File(binPath, "libproot_loader.so").absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        // 这设备的 filesDir 全 noexec，busybox/proot 都不能执行。
-        // 直接用 Android 系统 sh 在工作目录跑命令（不是 Debian，但工具能跑通）。
-        return CommandRunner.runBare("cd '$cwd' && $esc", cwd, timeoutMs)
+        return CommandRunner.runBareEnv(
+            listOf(p, "-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/data:/data",
+                "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc),
+            mapOf(
+                "LD_LIBRARY_PATH" to binPath,
+                "PROOT_LOADER" to loader,
+                "PATH" to "/system/bin"
+            ),
+            cwd, timeoutMs
+        )
     }
 
     fun isHighRisk(cmd: String): Boolean {
