@@ -42,10 +42,11 @@ object ProotDebian {
         refresh()
     }
 
-    /** 用系统动态链接器执行二进制，绕过 noexec 文件系统限制 */
-    private fun ldCmd(bin: String, args: String): String = "$linker $bin $bin $args"
-    private fun ldRun(bin: String, args: String, cwd: String, timeoutMs: Long) =
-        CommandRunner.runBare(ldCmd(bin, args), cwd, timeoutMs)
+    /** 用 linker64 执行 busybox，argv[0] 设为正确的工具名（tar/sh/proot 等） */
+    private fun ldRun(tool: String, bin: String, args: String, cwd: String, timeoutMs: Long) =
+        CommandRunner.runBare("$linker $bin $tool $args", cwd, timeoutMs)
+    private fun ldRunBB(tool: String, args: String, cwd: String, timeoutMs: Long) =
+        ldRun(tool, busybox().absolutePath, args, cwd, timeoutMs)
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
     private fun proot()   = File(binPath, "proot")
@@ -89,10 +90,10 @@ object ProotDebian {
                 copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
                 val a = archive.absolutePath; val r = rootDir().absolutePath
 
-                var result = ldRun(busybox().absolutePath, "tar -xJf $a -C $r", filesPath, 600_000)
+                var result = ldRunBB("tar", "-xJf $a -C $r", filesPath, 600_000)
                 if (!result.ok) {
                     _progress.value = "xz 失败，试 gzip…"
-                    result = ldRun(busybox().absolutePath, "tar -xzf $a -C $r", filesPath, 600_000)
+                    result = ldRunBB("tar", "-xzf $a -C $r", filesPath, 600_000)
                 }
                 archive.delete()
 
@@ -101,7 +102,7 @@ object ProotDebian {
                 val topDirs = rootDir().listFiles()?.filter { it.isDirectory } ?: emptyList()
                 if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
                     _progress.value = "整理目录…"
-                    ldRun(busybox().absolutePath, "tar -C \"${topDirs[0].absolutePath}\" -c . | tar -xC \"$r\"", filesPath, 60_000)
+                    ldRunBB("sh", "-c \"cd '${topDirs[0].absolutePath}' && ../busybox tar -c . | ../busybox tar -xC '$r' 2>/dev/null\" && ${busybox().absolutePath} rmdir '${topDirs[0].absolutePath}' 2>/dev/null", filesPath, 60_000)
                     topDirs[0].deleteRecursively()
                 }
 
@@ -123,9 +124,9 @@ object ProotDebian {
 
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
-        val p = proot().absolutePath; val r = rootDir().absolutePath
+        val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        return ldRun(p, "-r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
+        return ldRun("proot", proot().absolutePath, "-r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
