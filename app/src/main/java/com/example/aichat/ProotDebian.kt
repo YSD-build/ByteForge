@@ -30,8 +30,9 @@ object ProotDebian {
     }
 
     private fun pickBinDir(ctx: Context): File {
-        val native = File(ctx.applicationInfo.nativeLibraryDir)
-        return if (native.exists()) File(native, "byteforge") else File(filesPath, "bin")
+        val dir = File(ctx.codeCacheDir, "bf")
+        dir.mkdirs()
+        return dir
     }
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
