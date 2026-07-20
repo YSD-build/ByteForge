@@ -40,21 +40,44 @@ object ProotDebian {
         .readTimeout(600, TimeUnit.SECONDS) // rootfs 下载可能较久
         .build()
 
-    // ===== 多镜像自动降级（国内外站点） =====
+    // ===== 15+ 镜像源（官方 + 国内） =====
     private val prootMirrors = listOf(
-        "https://github.com/termux/proot-distro/releases/download/v4.17.0/proot-arm",
-        "https://gitlab.com/proot/proot/-/raw/master/static/proot",
-        "https://gitee.com/mirrors_termux/proot/raw/master/static/proot-arm"
+        // 官方 / GitHub raw
+        "https://raw.githubusercontent.com/ZhymabekRoman/proot-static/main/proot_static",
+        "https://github.com/termux/termux-packages/releases/download/proot-5.1.107/proot-aarch64",
+        "https://raw.githubusercontent.com/termux/proot-distro/master/proot-static-aarch64",
+        // 国内镜像
+        "https://mirrors.aliyun.com/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
+        "https://mirrors.tuna.tsinghua.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
+        "https://mirrors.ustc.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
+        "https://mirrors.bfsu.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb",
+        "https://mirrors.nju.edu.cn/termux/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb"
     )
     private val busyboxMirrors = listOf(
+        // 官方
         "https://busybox.net/downloads/binaries/1.35.0-arm64v8/busybox",
-        "https://github.com/termux/termux-packages/releases/download/busybox-1.35.0/busybox-arm",
-        "https://gitee.com/mirrors_termux/busybox/raw/master/busybox-arm"
+        "https://busybox.net/downloads/binaries/1.36.1-arm64v8/busybox",
+        // GitHub
+        "https://github.com/termux/termux-packages/releases/download/busybox-1.35.0/busybox-aarch64",
+        "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/busybox-aarch64",
+        // 国内镜像
+        "https://mirrors.aliyun.com/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb",
+        "https://mirrors.tuna.tsinghua.edu.cn/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb",
+        "https://mirrors.ustc.edu.cn/termux/termux-main/pool/main/b/busybox/busybox_1.35.0_aarch64.deb"
     )
     private val rootfsMirrors = listOf(
-        "https://github.com/termux/proot-distro/releases/download/v4.17.0/debian-bullseye-arm64.tar.xz",
-        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/rootfs.tar.xz",
-        "https://mirrors.aliyun.com/lxc-images/images/debian/bullseye/arm64/default/rootfs.tar.xz"
+        // Linux Containers 官方镜像（最可靠）
+        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20231217_05:24/rootfs.tar.xz",
+        "https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        // 清华 TUNA LXC 镜像
+        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20231217_05:24/rootfs.tar.xz",
+        "https://mirrors.tuna.tsinghua.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        // 阿里云 OSS
+        "https://mirrors.aliyun.com/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        // USTC 镜像
+        "https://mirrors.ustc.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz",
+        // 南京大学镜像
+        "https://mirrors.nju.edu.cn/lxc-images/images/debian/bullseye/arm64/default/20240325_05:24/rootfs.tar.xz"
     )
 
     /** 检查是否已初始化 */
