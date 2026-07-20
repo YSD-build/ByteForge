@@ -181,7 +181,10 @@ object ProotDebian {
         return CommandRunner.runBareEnv(
             listOf(linker, proot().absolutePath, "proot", "-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys",
                 "-b", "/data:/data", "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc),
-            mapOf("LD_LIBRARY_PATH" to binPath, "PATH" to "/system/bin"),
+            mapOf(
+                "LD_LIBRARY_PATH" to "$binPath:/system/lib64:/system/lib",
+                "PATH" to "/system/bin"
+            ),
             cwd, timeoutMs
         )
     }
