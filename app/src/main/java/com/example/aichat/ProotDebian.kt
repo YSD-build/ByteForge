@@ -36,7 +36,6 @@ object ProotDebian {
         stateInited = true
         filesPath = context.filesDir.absolutePath
         binPath = File(filesPath, "bin").apply { mkdirs() }.absolutePath
-        if (!File(linker).exists()) linker = "/system/bin/linker"
         createNotifyChannel(context)
         refresh()
     }
@@ -106,7 +105,6 @@ object ProotDebian {
                 }
 
                 // 诊断：列出解压产物
-                val lsCmd = "$linker ${busybox().absolutePath} ls ls -la $r/"
                 val lsOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "ls", "-la", r), filesPath, 10_000).output.take(400)
                 val findOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "find", r, "-maxdepth", "2", "-type", "d"), filesPath, 10_000).output.take(600)
 

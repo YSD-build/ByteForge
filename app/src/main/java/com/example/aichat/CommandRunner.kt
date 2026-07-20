@@ -41,6 +41,6 @@ object CommandRunner {
         t.join(2000)
         val text = out.toString()
         val shown = if (text.length > 8000) text.take(8000) + "\n…(已截断)" else text
-        ToolResult(true, "退出码 ${proc.exitValue()}：\n$shown")
+        return ToolResult(true, "退出码 ${proc.exitValue()}：\n$shown")
     }
 }
