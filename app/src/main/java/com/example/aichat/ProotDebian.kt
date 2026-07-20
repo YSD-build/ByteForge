@@ -28,7 +28,6 @@ object ProotDebian {
 
     private var filesPath = ""
     private var binPath = ""
-    private var linker = "/system/bin/linker64"
     @Volatile private var stateInited = false
     private const val CHANNEL_ID = "byteforge_debian"
 
@@ -42,11 +41,11 @@ object ProotDebian {
         refresh()
     }
 
-    /** 用 linker64 执行 busybox，argv[0] 设为正确的工具名（tar/sh/proot 等） */
-    private fun ldRun(tool: String, bin: String, args: String, cwd: String, timeoutMs: Long) =
-        CommandRunner.runBare("$linker $bin $tool $args", cwd, timeoutMs)
-    private fun ldRunBB(tool: String, args: String, cwd: String, timeoutMs: Long) =
-        ldRun(tool, busybox().absolutePath, args, cwd, timeoutMs)
+    /** 用 ProcessBuilder 直接执行二进制（不走 shell，避免 linker64 兼容问题） */
+    private fun execBin(tool: String, bin: File, args: List<String>, cwd: String, timeoutMs: Long): ToolResult =
+        CommandRunner.runArgs(listOf(bin.absolutePath, tool) + args, cwd, timeoutMs)
+    private fun execBB(tool: String, args: List<String>, cwd: String, timeoutMs: Long): ToolResult =
+        execBin(tool, busybox(), args, cwd, timeoutMs)
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
     private fun proot()   = File(binPath, "proot")
@@ -90,10 +89,10 @@ object ProotDebian {
                 copyAsset(context, "debian-rootfs.tar.xz", archive.absolutePath)
                 val a = archive.absolutePath; val r = rootDir().absolutePath
 
-                var result = ldRunBB("tar", "-xJf $a -C $r", filesPath, 600_000)
+                var result = execBB("tar", listOf("-xJf", a, "-C", r), filesPath, 600_000)
                 if (!result.ok) {
                     _progress.value = "xz 失败，试 gzip…"
-                    result = ldRunBB("tar", "-xzf $a -C $r", filesPath, 600_000)
+                    result = execBB("tar", listOf("-xzf", a, "-C", r), filesPath, 600_000)
                 }
                 archive.delete()
 
@@ -102,14 +101,14 @@ object ProotDebian {
                 val topDirs = rootDir().listFiles()?.filter { it.isDirectory } ?: emptyList()
                 if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
                     _progress.value = "整理目录…"
-                    ldRunBB("sh", "-c \"cd '${topDirs[0].absolutePath}' && ../busybox tar -c . | ../busybox tar -xC '$r' 2>/dev/null\" && ${busybox().absolutePath} rmdir '${topDirs[0].absolutePath}' 2>/dev/null", filesPath, 60_000)
+                    execBB("sh", listOf("-c", "cp -a '${topDirs[0].absolutePath}'/* '$r/' && rmdir '${topDirs[0].absolutePath}'"), filesPath, 60_000)
                     topDirs[0].deleteRecursively()
                 }
 
                 // 诊断：列出解压产物
                 val lsCmd = "$linker ${busybox().absolutePath} ls ls -la $r/"
-                val lsOut = CommandRunner.runBare(lsCmd, filesPath, 10_000).output.take(400)
-                val findOut = CommandRunner.runBare("$linker ${busybox().absolutePath} find find $r -maxdepth 2 -type d", filesPath, 10_000).output.take(600)
+                val lsOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "ls", "-la", r), filesPath, 10_000).output.take(400)
+                val findOut = CommandRunner.runArgs(listOf(busybox().absolutePath, "find", r, "-maxdepth", "2", "-type", "d"), filesPath, 10_000).output.take(600)
 
                 if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
                     _progress.value = "解压后无 usr/bin。tar退出=${result.ok}\n目录列表:\n$lsOut\n\n目录树:\n$findOut"
@@ -132,7 +131,9 @@ object ProotDebian {
         if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
         val r = rootDir().absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        return ldRun("proot", proot().absolutePath, "-r $r -b /dev -b /proc -b /sys -b /data:/data -b $cwd:$cwd --cwd=$cwd /bin/bash -c \"$esc\"", cwd, timeoutMs)
+        val args = listOf("-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys",
+            "-b", "/data:/data", "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc)
+        return execBin("proot", proot(), args, cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
