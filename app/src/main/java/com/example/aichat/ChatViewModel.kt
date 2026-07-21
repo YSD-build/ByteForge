@@ -155,18 +155,6 @@ class ChatViewModel(
             persistAll(_messages.value)
             return
         }
-        // Debian 环境未初始化时禁止使用 Agent
-        if (!ProotDebian.isReady()) {
-            val m = ChatMessage(
-                id = UUID.randomUUID().toString(),
-                role = "assistant",
-                content = "⚠️ Debian 终端环境尚未初始化。\n请到「设置 → 终端环境」中点击「初始化 Debian 终端」完成下载后再使用 Agent。",
-                createdAt = System.currentTimeMillis()
-            )
-            _messages.value = _messages.value + m
-            persistAll(_messages.value)
-            return
-        }
         val engine = AgentEngine(dir)
         val goalMsg = ChatMessage(
             id = UUID.randomUUID().toString(),

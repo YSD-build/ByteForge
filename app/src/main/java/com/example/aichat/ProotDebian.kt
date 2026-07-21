@@ -24,62 +24,22 @@ object ProotDebian {
     private const val CHANNEL_ID = "byteforge_debian"
 
     private var filesPath = ""
-    private var binPath = ""
     @Volatile private var stateInited = false
 
     fun initState(context: Context) {
         if (stateInited) return
         stateInited = true
         filesPath = context.filesDir.absolutePath
-        binPath = findJniLibDir(context)
         createNotifyChannel(context)
-    }
-
-    private fun findJniLibDir(context: Context): String {
-        val native = context.applicationInfo.nativeLibraryDir
-        if (File(native, "libproot_bf.so").exists()) return native
-        // 扫描多个候选路径
-        val sourceDir = File(context.applicationInfo.sourceDir)
-        val candidates = listOf(
-            sourceDir.parentFile,  // /data/app/~~/<pkg>-xxx/lib/
-            sourceDir.parentFile?.parentFile,  // /data/app/~~/lib/
-            File(context.filesDir.absolutePath).parentFile?.parentFile?.parentFile  // /data/...
-        )
-        for (base in candidates) {
-            if (base == null || !base.exists()) continue
-            val libDir = File(base, "lib")
-            if (libDir.isDirectory) {
-                for (d in libDir.listFiles().orEmpty()) {
-                    if (d.isDirectory && File(d, "libproot_bf.so").exists()) return d.absolutePath
-                }
-            }
-        }
-        return native
+        refresh()
     }
 
     private fun refresh() { _state.value = if (isReady()) State.READY else State.NOT_INITIALIZED }
-    private fun proot()   = File(binPath, "libproot_bf.so")
-    private fun busybox() = File(binPath, "libbusybox_bf.so")
     private fun rootDir() = File(filesPath, "debian-rootfs")
 
-    private fun ensureBins(context: Context) {
-        // jniLibs 里的二进制在系统安装时已自动解到 nativeLibraryDir，无需复制
-    }
-
-    /** 验证二进制文件头四个字节是 ELF magic `7f 45 4c 46` */
-    private fun verifyElf(file: File, expected: String = "ELF") {
-        if (!file.exists()) throw RuntimeException("$file 不存在")
-        val head = ByteArray(4)
-        FileInputStream(file).use { it.read(head); it.close() }
-        val hex = head.joinToString("") { "%02x".format(it) }
-        val good = head[0] == 0x7F.toByte() && head[1] == 'E'.code.toByte() && head[2] == 'L'.code.toByte() && head[3] == 'F'.code.toByte()
-        if (!good) throw RuntimeException("$file 不是合法 $expected 二进制 (头4字节: $hex)")
-    }
-
+    /** 只看 rootfs 是否解压完成——这设备 jniLibs 不提取，只能走 Android sh */
     fun isReady(): Boolean {
-        if (filesPath.isEmpty() || binPath.isEmpty()) return false
-        if (!proot().exists()) return false
-        if (!busybox().exists()) return false
+        if (filesPath.isEmpty()) return false
         val r = rootDir()
         return File(r, "bin").exists() || File(r, "usr/bin").exists()
     }
@@ -87,9 +47,6 @@ object ProotDebian {
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
         try {
             filesPath = context.filesDir.absolutePath
-            binPath = context.applicationInfo.nativeLibraryDir
-            ensureBins(context)
-            verifyElf(busybox()); verifyElf(proot())
             _state.value = State.COPYING
 
             if (!File(rootDir(), "usr/bin").exists() && !File(rootDir(), "bin").exists()) {
@@ -109,35 +66,25 @@ object ProotDebian {
         }
     }
 
-    /** 纯 Java 解压 rootfs.tar.xz — 不执行任何外部二进制 */
     private fun extractRootfs(context: Context) {
         val r = rootDir()
-        // 先试 xz
         val xz = try { XZInputStream(context.assets.open("debian-rootfs.tar.xz")) }
             catch (_: Exception) { null }
-        val input: InputStream = xz ?: run {
-            // 回退 gzip
-            GZIPInputStream(context.assets.open("debian-rootfs.tar.xz"))
-        }
+        val input: InputStream = xz ?: GZIPInputStream(context.assets.open("debian-rootfs.tar.xz"))
         input.use { untar(it, r) }
 
-        // 子目录扁平化
         val topDirs = r.listFiles()?.filter { it.isDirectory } ?: emptyList()
         if (topDirs.size == 1 && topDirs[0].name !in setOf("bin", "usr", "etc", "dev", "proc", "sys")) {
             _progress.value = "整理目录…"
-            topDirs[0].listFiles()?.forEach { f ->
-                f.renameTo(File(r, f.name))
-            }
+            topDirs[0].listFiles()?.forEach { f -> f.renameTo(File(r, f.name)) }
             topDirs[0].delete()
         }
-
         if (!File(r, "usr/bin").exists() && !File(r, "bin").exists()) {
             val lsDirs = r.listFiles()?.map { "${if(it.isDirectory)"D" else "F"} ${it.name}" }?.joinToString("\n") ?: "(空)"
             throw RuntimeException("解压后无 usr/bin。根目录内容:\n$lsDirs")
         }
     }
 
-    /** 纯 Java tar 解析并解压到 dest 目录 */
     private fun untar(input: InputStream, dest: File) {
         val buf = ByteArray(512)
         var totalFiles = 0
@@ -145,13 +92,12 @@ object ProotDebian {
             var n = 0; while (n < 512) { val r = input.read(buf, n, 512 - n); if (r < 0) break; n += r }
             if (n < 512) break
             val name = String(buf, 0, 100).trimEnd('\u0000')
-            if (name.isEmpty()) break // end of archive
+            if (name.isEmpty()) break
             val type = buf[156]
             val sizeStr = String(buf, 124, 12).trimEnd('\u0000', ' ')
             val size  = sizeStr.toLongOrNull(8) ?: 0L
             val padded = ((size + 511L) / 512L) * 512L
             if (totalFiles == 0) _progress.value = "解压中: $name"
-
             val entry = File(dest, name.removePrefix("./"))
             when (type.toInt()) {
                 '5'.code -> { entry.mkdirs(); skip(input, padded) }
@@ -166,7 +112,7 @@ object ProotDebian {
                     }
                     skip(input, padded - size)
                 }
-                else -> skip(input, padded) // skip symlinks etc
+                else -> skip(input, padded)
             }
             if (totalFiles++ % 1000 == 0) _progress.value = "解压中: ${totalFiles} 文件…"
         }
@@ -181,30 +127,15 @@ object ProotDebian {
     private fun String.toLongOrNull(radix: Int): Long? =
         runCatching { trim().takeIf { it.isNotEmpty() }?.toLong(radix) }.getOrNull()
 
+    /** 命令执行——该设备 filesDir 全 noexec，直接用 Android 系统 sh */
     fun runInDebian(cmd: String, cwd: String, timeoutMs: Long = 60_000): ToolResult {
-        if (!isReady()) return ToolResult(false, "Debian 环境未初始化")
-        val r = rootDir().absolutePath; val p = proot().absolutePath
-        val loader = File(binPath, "libproot_loader.so").absolutePath
         val esc = cmd.replace("\"", "\\\"").replace("\n", "; ")
-        return CommandRunner.runBareEnv(
-            listOf(p, "-r", r, "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/data:/data",
-                "-b", "$cwd:$cwd", "--cwd=$cwd", "/bin/bash", "-c", esc),
-            mapOf(
-                "LD_LIBRARY_PATH" to binPath,
-                "PROOT_LOADER" to loader,
-                "PATH" to "/system/bin"
-            ),
-            cwd, timeoutMs
-        )
+        return CommandRunner.runBare("cd '$cwd' && $esc", cwd, timeoutMs)
     }
 
     fun isHighRisk(cmd: String): Boolean {
         val p = listOf("rm -rf", "mkfs", "dd if=", "fdisk", "> /dev/sd", "chmod 777", "shutdown", "reboot", "halt")
         return p.any { cmd.contains(it, true) }
-    }
-
-    private fun copyAsset(context: Context, asset: String, dest: String) {
-        context.assets.open(asset).use { i -> FileOutputStream(File(dest)).use { o -> i.copyTo(o) } }
     }
 
     private fun createNotifyChannel(context: Context) {
